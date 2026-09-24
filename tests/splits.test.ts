@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   analyze,
+  type Analysis,
   compatible,
   parseSpecies,
   parseSplits,
@@ -201,6 +202,187 @@ describe('solveMaxCompatible / analyze', () => {
   });
 });
 
+describe('复核批次并列场景（7 物种、12 候选）', () => {
+  // 权重 4 的 BCDEG、权重 3 的 BCDE、CDE 三条两两兼容且共同出现；
+  // 权重同为 2 的 CE 与 DE 互相替代（彼此冲突，与三条共同分裂均兼容）；
+  // 其余 7 个权重 2 候选在相同权重下形成不同的兼容关系，且无法进入同优解。
+  const SPECIES7 = 'A B C D E F G';
+  const BATCH = [
+    '4: B C D E G',
+    '3: B C D E',
+    '3: C D E',
+    '2: C E',
+    '2: D E',
+    '2: B C F',
+    '2: B E',
+    '2: C F',
+    '2: D E F',
+    '2: C D F G',
+    '2: B E F G',
+    '2: B C F G',
+  ];
+  // 互补规范化不变性：用含首个物种 A 的一侧（取补）重录若干候选
+  const BATCH_FLIPPED = [
+    '4: A F', // = B C D E G
+    '3: B C D E | A F G',
+    '3: A B F G', // = C D E
+    '2: C E | A B D F G',
+    '2: A B C F G', // = D E
+    '2: B C F',
+    '2: B E',
+    '2: C F',
+    '2: D E F',
+    '2: C D F G',
+    '2: B E F G',
+    '2: B C F G',
+  ];
+
+  function analyzeBatch(lines: string[]) {
+    const sp = parseSpecies(SPECIES7);
+    expect(sp.errors).toEqual([]);
+    const r = parseSplits(lines.join('\n'), sp.names);
+    expect(r.errors).toEqual([]);
+    expect(r.lineErrors).toEqual([]);
+    expect(r.candidates).toHaveLength(12);
+    const an = analyze(
+      r.candidates.map((c) => c.mask),
+      r.candidates.map((c) => c.weight),
+      r.candidates.map((c) => c.label),
+      sp.names.length,
+    );
+    return { sp, r, an };
+  }
+
+  function assertBatch(r: ReturnType<typeof analyzeBatch>['r'], an: Analysis) {
+    // 得分与数量
+    expect(an.score).toEqual({ weight: 12, count: 4 });
+
+    // 规范展示解：三条共同分裂 + 按字典序取 CE（"C E" < "D E"）
+    expect(an.chosen.map((i) => r.candidates[i].label)).toEqual([
+      'B C D E',
+      'B C D E G',
+      'C D E',
+      'C E',
+    ]);
+
+    // 三分类：BCDEG / BCDE / CDE 必选；CE 与 DE 可选；其余从不选
+    expect(
+      r.candidates.map((c, i) => `${c.weight}:${c.label}=${an.verdicts[i]}`),
+    ).toEqual([
+      '4:B C D E G=required',
+      '3:B C D E=required',
+      '3:C D E=required',
+      '2:C E=optional',
+      '2:D E=optional',
+      '2:B C F=never',
+      '2:B E=never',
+      '2:C F=never',
+      '2:D E F=never',
+      '2:C D F G=never',
+      '2:B E F G=never',
+      '2:B C F G=never',
+    ]);
+
+    // 兼容矩阵可独立复算：对称、对角为真、与四交集定义一致
+    expect(an.compat).toHaveLength(12);
+    for (let i = 0; i < 12; i++) {
+      expect(an.compat[i]).toHaveLength(12);
+      expect(an.compat[i][i]).toBe(true);
+      for (let j = 0; j < 12; j++) {
+        expect(an.compat[i][j]).toBe(
+          i === j || compatible(r.candidates[i].mask, r.candidates[j].mask, 7),
+        );
+        expect(an.compat[i][j]).toBe(an.compat[j][i]);
+      }
+    }
+    // 关键关系：三条共同分裂与 CE/DE 均兼容；CE 与 DE 冲突
+    const at = (label: string) => r.candidates.findIndex((c) => c.label === label);
+    for (const s of ['B C D E G', 'B C D E', 'C D E']) {
+      expect(an.compat[at(s)][at('C E')]).toBe(true);
+      expect(an.compat[at(s)][at('D E')]).toBe(true);
+    }
+    expect(an.compat[at('C E')][at('D E')]).toBe(false);
+  }
+
+  it('得分 12/4、CE 与 DE 均可选、展示解字典序取 CE、三条共同分裂必选', () => {
+    const { r, an } = analyzeBatch(BATCH);
+    assertBatch(r, an);
+  });
+
+  it('调整候选录入顺序后，按规范标签对应的结论完全一致', () => {
+    const reversed = analyzeBatch([...BATCH].reverse());
+    const shuffled = analyzeBatch([...BATCH.slice(5), ...BATCH.slice(0, 5)]);
+    const base = analyzeBatch(BATCH);
+
+    const byLabel = (res: typeof base) => {
+      const map = new Map<string, unknown>();
+      res.r.candidates.forEach((c, i) =>
+        map.set(c.label, {
+          weight: c.weight,
+          verdict: res.an.verdicts[i],
+          chosen: res.an.chosen.includes(i),
+        }),
+      );
+      return map;
+    };
+    for (const res of [reversed, shuffled]) {
+      expect(res.an.score).toEqual(base.an.score);
+      expect(byLabel(res)).toEqual(byLabel(base));
+      // 展示解的规范标签序列与录入顺序无关
+      expect(res.an.chosen.map((i) => res.r.candidates[i].label)).toEqual(
+        base.an.chosen.map((i) => base.r.candidates[i].label),
+      );
+    }
+  });
+
+  it('互补规范化（取补录入 / 双侧录入）不改变结论', () => {
+    const flipped = analyzeBatch(BATCH_FLIPPED);
+    assertBatch(flipped.r, flipped.an);
+  });
+
+  it('与 2^12 暴力枚举互算：两组前两级同优解仅在 CE/DE 间替代', () => {
+    const { r, an } = analyzeBatch(BATCH);
+    const masks = r.candidates.map((c) => c.mask);
+    const weights = r.candidates.map((c) => c.weight);
+    const labels = r.candidates.map((c) => c.label);
+    const opt: number[][] = [];
+    let bestW = -1;
+    let bestC = -1;
+    for (let s = 0; s < 1 << 12; s++) {
+      const mem: number[] = [];
+      for (let i = 0; i < 12; i++) if (s & (1 << i)) mem.push(i);
+      let ok = true;
+      for (let a = 0; a < mem.length && ok; a++) {
+        for (let b = a + 1; b < mem.length && ok; b++) {
+          if (!compatible(masks[mem[a]], masks[mem[b]], 7)) ok = false;
+        }
+      }
+      if (!ok) continue;
+      const w = mem.reduce((x, i) => x + weights[i], 0);
+      const c = mem.length;
+      if (w > bestW || (w === bestW && c > bestC)) {
+        bestW = w;
+        bestC = c;
+        opt.length = 0;
+        opt.push(mem);
+      } else if (w === bestW && c === bestC) opt.push(mem);
+    }
+    expect(bestW).toBe(12);
+    expect(bestC).toBe(4);
+    expect(opt).toHaveLength(2);
+    const sets = opt.map((mem) => mem.map((i) => labels[i]).sort());
+    expect(sets).toContainEqual(['B C D E', 'B C D E G', 'C D E', 'C E']);
+    expect(sets).toContainEqual(['B C D E', 'B C D E G', 'C D E', 'D E']);
+    // 暴力三分类与实现一致
+    labels.forEach((label, i) => {
+      const inAll = opt.every((mem) => mem.includes(i));
+      const inSome = opt.some((mem) => mem.includes(i));
+      const expected = inAll ? 'required' : inSome ? 'optional' : 'never';
+      expect(an.verdicts[i], label).toBe(expected);
+    });
+  });
+});
+
 describe('popcount', () => {
   it('基本计数', () => {
     expect(popcount(0)).toBe(0);
@@ -278,30 +460,27 @@ describe('与暴力枚举对照（随机实例）', () => {
     const rand = lcg(20260922);
     for (let t = 0; t < 200; t++) {
       const n = 5 + Math.floor(rand() * 4); // 5–8 个物种
-      const m = 4 + Math.floor(rand() * 7); // 4–10 个候选
-      const full = (1 << n) - 1;
-      const seen = new Set<number>();
-      const masks: number[] = [];
-      const weights: number[] = [];
-      const labels: string[] = [];
-      while (masks.length < m) {
-        const size = 2 + Math.floor(rand() * (n - 3)); // 2..n-2
-        let mask = 0;
-        while (popcount(mask) < size) mask |= 1 << Math.floor(rand() * n);
-        if ((mask & 1) !== 0) mask = full ^ mask; // 互补规范化
-        if (popcount(mask) < 2 || popcount(mask) > n - 2) continue;
-        if (seen.has(mask)) continue;
-        seen.add(mask);
-        masks.push(mask);
-        weights.push(1 + Math.floor(rand() * 9));
-        labels.push(
-          Array.from({ length: n }, (_, i) => i)
-            .filter((i) => ((mask >> i) & 1) === 1)
-            .map((i) => `s${i}`)
-            .sort()
-            .join(' '),
-        );
+      // 先取全部规范（不含 s0）非平凡掩码做无放回抽样，避免小 n 下候选池枯竭死循环
+      const pool: number[] = [];
+      for (let msk = 1; msk < 1 << n; msk++) {
+        if ((msk & 1) !== 0) continue;
+        const c = popcount(msk);
+        if (c >= 2 && c <= n - 2) pool.push(msk);
       }
+      const m = 4 + Math.floor(rand() * Math.min(10, pool.length - 3)); // 4–13，覆盖 ≥12 的并列高发规模
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+      const masks = pool.slice(0, m);
+      const weights = masks.map(() => 1 + Math.floor(rand() * 9));
+      const labels = masks.map((mask) =>
+        Array.from({ length: n }, (_, i) => i)
+          .filter((i) => ((mask >> i) & 1) === 1)
+          .map((i) => `s${i}`)
+          .sort()
+          .join(' '),
+      );
       const an = analyze(masks, weights, labels, n);
       const bf = bruteForce(masks, weights, labels, n);
       expect(an.score, `实例 ${t} 得分`).toEqual({ weight: bf.weight, count: bf.count });

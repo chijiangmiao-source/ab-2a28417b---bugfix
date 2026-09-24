@@ -233,38 +233,11 @@ function sameScore(a: Score, b: Score): boolean {
   return a.weight === b.weight && a.count === b.count;
 }
 
-function reduceSearchCandidates(compat: boolean[][], weights: number[]): number[] {
-  const active = new Array<boolean>(weights.length).fill(true);
-  if (weights.length < 12) return active.map((_, i) => i);
-
-  for (let candidate = 0; candidate < weights.length; candidate++) {
-    for (let replacement = 0; replacement < weights.length; replacement++) {
-      if (candidate === replacement || weights[candidate] !== weights[replacement]) continue;
-      let coversEveryNeighbor = true;
-      let hasExtraNeighbor = false;
-      for (let other = 0; other < weights.length; other++) {
-        if (other === candidate || other === replacement) continue;
-        if (compat[candidate][other] && !compat[replacement][other]) {
-          coversEveryNeighbor = false;
-          break;
-        }
-        if (!compat[candidate][other] && compat[replacement][other]) hasExtraNeighbor = true;
-      }
-      if (coversEveryNeighbor && hasExtraNeighbor) {
-        active[candidate] = false;
-        break;
-      }
-    }
-  }
-
-  return active.flatMap((isActive, i) => (isActive ? [i] : []));
-}
-
 /**
  * 精确求解带约束的最大兼容集：先最大化总权重，再最大化数量。
  * forcedIn 中的候选必选，forcedOut 中的候选禁用；约束不可行时返回 null。
  * 分支定界：候选 ≤28，用位掩码表示剩余候选集；上界 = 当前权重 + 剩余权重和。
- * 相容的非平凡分裂集合大小 ≤ n-3（二歧树内部分裂数），用于数量剪枝。
+ * 相容的非平凡分裂集合大小 ≤ n−3（二歧树内部分裂数），用于数量剪枝。
  */
 export function solveMaxCompatible(
   masks: number[],
@@ -347,6 +320,8 @@ export function solveMaxCompatible(
 
 /**
  * 完整分析：兼容矩阵、最优得分、字典序最小展示解、候选三分类。
+ * 所有结论（得分、数量、展示解、三分类、兼容矩阵）都基于同一批完整候选身份，
+ * 不得剔除或合并任何候选——否则并列解会被偷偷改变。
  * 三分类基于全部前两级（总权重、数量）同优解：
  * 必选＝出现在每个同优解；可选＝出现在部分同优解；从不选＝不出现在任何同优解。
  */
@@ -365,44 +340,34 @@ export function analyze(
     compat.push(row);
   }
 
-  const activeIndexes = reduceSearchCandidates(compat, weights);
-  const activeMasks = activeIndexes.map((i) => masks[i]);
-  const activeWeights = activeIndexes.map((i) => weights[i]);
-  const compactIndex = new Map<number, number>(
-    activeIndexes.map((original, compact): [number, number] => [original, compact]),
-  );
   const best = solveMaxCompatible(masks, weights, n);
   if (best === null) throw new Error('空集恒可行，不应无解');
 
   // 字典序最小展示解：按规范标签升序贪心，能选则选。
   // 若某同优解含更小标签的分裂而另一解不含，则前者的规范序列必然后缀无关地更小，
   // 故逐步「可行即选」可得到字典序最小序列。
-  const order = [...activeIndexes].sort((a, b) =>
-    labels[a] < labels[b] ? -1 : 1,
+  const order = Array.from({ length: m }, (_, i) => i).sort((a, b) =>
+    labels[a] < labels[b] ? -1 : labels[a] > labels[b] ? 1 : a - b,
   );
-  const chosenCompact: number[] = [];
-  const forcedOut = new Set<number>();
-  for (const original of order) {
-    const i = compactIndex.get(original) as number;
-    const s = solveMaxCompatible(activeMasks, activeWeights, n, [...chosenCompact, i], forcedOut);
-    if (s !== null && sameScore(s, best)) chosenCompact.push(i);
+  const chosen: number[] = [];
+  const forcedOut = new Set<number>(); // 已证明无法并入当前前缀的同优解，之后也不可能
+  for (const i of order) {
+    const s = solveMaxCompatible(masks, weights, n, [...chosen, i], forcedOut);
+    if (s !== null && sameScore(s, best)) chosen.push(i);
     else forcedOut.add(i);
   }
-  const chosen = chosenCompact.map((i) => activeIndexes[i]);
+  chosen.sort((a, b) => (labels[a] < labels[b] ? -1 : labels[a] > labels[b] ? 1 : a - b));
 
-  // 三分类
+  // 三分类：对每个候选分别在「强制选」与「强制不选」下求最优。
+  // inSome＝存在含它的同优解；inAll＝不存在不含它的同优解。
+  // 仅当 inAll 且 inSome 时才是必选（约束可行时二者本应一致，显式取交更稳妥）。
   const verdicts: Verdict[] = [];
-  for (let original = 0; original < m; original++) {
-    const i = compactIndex.get(original);
-    if (i === undefined) {
-      verdicts.push('never');
-      continue;
-    }
-    const withI = solveMaxCompatible(activeMasks, activeWeights, n, [i]);
+  for (let i = 0; i < m; i++) {
+    const withI = solveMaxCompatible(masks, weights, n, [i]);
     const inSome = withI !== null && sameScore(withI, best);
-    const withoutI = solveMaxCompatible(activeMasks, activeWeights, n, [], new Set([i]));
-    const inAll = !(withoutI !== null && sameScore(withoutI, best));
-    if (inAll) verdicts.push('required');
+    const withoutI = solveMaxCompatible(masks, weights, n, [], new Set([i]));
+    const inAll = withoutI === null || !sameScore(withoutI, best);
+    if (inAll && inSome) verdicts.push('required');
     else if (!inSome) verdicts.push('never');
     else verdicts.push('optional');
   }

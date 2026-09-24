@@ -3,8 +3,21 @@ import { analyze, parseSpecies, parseSplits } from './lib/splits';
 import { SplitTable } from './components/SplitTable';
 import { CompatMatrix } from './components/CompatMatrix';
 
-const DEFAULT_SPECIES = 'A B C D E F';
-const DEFAULT_SPLITS = ['10: A B', '5: C D', '5: C E', '12: A C'].join('\n');
+const DEFAULT_SPECIES = 'A B C D E F G';
+const DEFAULT_SPLITS = [
+  '4: B C D E G',
+  '3: B C D E',
+  '3: C D E',
+  '2: C E',
+  '2: D E',
+  '2: B C F',
+  '2: B E',
+  '2: C F',
+  '2: D E F',
+  '2: C D F G',
+  '2: B E F G',
+  '2: B C F G',
+].join('\n');
 
 export default function App() {
   const [speciesText, setSpeciesText] = useState(DEFAULT_SPECIES);

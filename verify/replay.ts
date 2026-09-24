@@ -107,6 +107,85 @@ header('场景三：候选三分类（必选 / 可选 / 从不选）与字典序
   );
 }
 
+// ---------------------------------------------------------------- 场景四
+header('场景四：复核批次并列（7 物种 12 候选；CE 与 DE 同权替代，二者均可选）');
+{
+  // BCDEG(4)、BCDE(3)、CDE(3) 三条共同出现且必选；CE(2) 与 DE(2) 互相替代，
+  // 其余 7 个权重 2 候选只在同权重下形成不同兼容关系，均无法进入同优解。
+  const sp = parseSpecies('A B C D E F G');
+  const lines = [
+    '4: B C D E G',
+    '3: B C D E',
+    '3: C D E',
+    '2: C E',
+    '2: D E',
+    '2: B C F',
+    '2: B E',
+    '2: C F',
+    '2: D E F',
+    '2: C D F G',
+    '2: B E F G',
+    '2: B C F G',
+  ];
+  const r = parseSplits(lines.join('\n'), sp.names);
+  check('候选全部合法且恰为 12 条', r.errors.length === 0 && r.lineErrors.length === 0 && r.candidates.length === 12,
+    `有效候选 ${r.candidates.length}，行错误 ${r.lineErrors.length}，全局错误 ${r.errors.length}`);
+  const an = analyze(
+    r.candidates.map((c) => c.mask),
+    r.candidates.map((c) => c.weight),
+    r.candidates.map((c) => c.label),
+    sp.names.length,
+  );
+  check(
+    '最大总权重 12、数量 4',
+    an.score.weight === 12 && an.score.count === 4,
+    `总权重 ${an.score.weight}、数量 ${an.score.count}`,
+  );
+  const verdictOf = (label: string) =>
+    an.verdicts[r.candidates.findIndex((c) => c.label === label)];
+  check(
+    '三条共同分裂必选',
+    verdictOf('B C D E G') === 'required' &&
+      verdictOf('B C D E') === 'required' &&
+      verdictOf('C D E') === 'required',
+    `BCDEG=${verdictOf('B C D E G')} BCDE=${verdictOf('B C D E')} CDE=${verdictOf('C D E')}`,
+  );
+  check(
+    'CE 与 DE 均为可选（不得一个必选、一个从不选）',
+    verdictOf('C E') === 'optional' && verdictOf('D E') === 'optional',
+    `C E=${verdictOf('C E')} D E=${verdictOf('D E')}`,
+  );
+  const chosenLabels = an.chosen.map((i) => r.candidates[i].label);
+  check(
+    '展示解按字典序采用 CE 而非 DE',
+    chosenLabels.includes('C E') && !chosenLabels.includes('D E'),
+    `展示解 = [${chosenLabels.map((s) => `"${s}"`).join(', ')}]`,
+  );
+  // 调整录入顺序（逆序）后按标签对应结论一致
+  const r2 = parseSplits([...lines].reverse().join('\n'), sp.names);
+  const an2 = analyze(
+    r2.candidates.map((c) => c.mask),
+    r2.candidates.map((c) => c.weight),
+    r2.candidates.map((c) => c.label),
+    sp.names.length,
+  );
+  const profile = (res: typeof an2, parsed: typeof r2) =>
+    parsed.candidates
+      .map((c, i) => `${c.label}:${res.verdicts[i]}${res.chosen.includes(i) ? '#选' : ''}`)
+      .sort()
+      .join(',');
+  check('录入顺序变化不改变按标签对应的结论', profile(an2, r2) === profile(an, r),
+    '逆序录入的三分类与展示解集合与正序一致');
+  // 兼容矩阵：CE 与 DE 冲突；三条共同分裂与二者均兼容
+  const at = (label: string) => r.candidates.findIndex((c) => c.label === label);
+  const matrixOk =
+    an.compat[at('C E')][at('D E')] === false &&
+    ['B C D E G', 'B C D E', 'C D E'].every(
+      (s) => an.compat[at(s)][at('C E')] && an.compat[at(s)][at('D E')],
+    );
+  check('兼容矩阵可复算并列关系', matrixOk, 'CE ✗ DE；BCDEG/BCDE/CDE 均与 CE、DE 兼容');
+}
+
 // ---------------------------------------------------------------- 汇总
 console.log('\n==================================================');
 if (failures === 0) {
