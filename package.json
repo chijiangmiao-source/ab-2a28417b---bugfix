@@ -1,0 +1,27 @@
+{
+  "name": "split-audit",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "系统发育分裂审计：纯浏览器端的精确最大兼容集选取与候选三分类",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "replay": "tsx verify/replay.ts"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}

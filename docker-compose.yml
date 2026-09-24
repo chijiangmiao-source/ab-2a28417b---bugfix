@@ -1,0 +1,31 @@
+name: split-audit
+
+services:
+  # 静态 Web：仅浏览器运行的审计页，宿主机端口由 WEB_PORT 配置（默认 8080）
+  web:
+    build:
+      context: .
+      target: web
+    image: split-audit-web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # 一次性验收：重放样例 + 单元测试 + 生产构建检查 + HTTP 冒烟，随后自行退出并报告退出码
+  verify:
+    build:
+      context: .
+      target: verify
+    image: split-audit-verify
+    environment:
+      WEB_HOST: web
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: "no"

@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.venv/
+node_modules/
+dist/
+*.log
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.pyc
+*.pyo
