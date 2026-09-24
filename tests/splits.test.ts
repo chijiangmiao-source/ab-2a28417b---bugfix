@@ -201,6 +201,177 @@ describe('solveMaxCompatible / analyze', () => {
   });
 });
 
+describe('7 物种 12 候选并列场景：CE/DE 等权替代（回归）', () => {
+  const SPECIES7 = 'A B C D E F G';
+  // (权重, 规范侧物种)；规范侧均不含首个物种 A
+  const SPEC: ReadonlyArray<readonly [number, string]> = [
+    [4, 'B C D E G'],
+    [3, 'B C D E'],
+    [3, 'C D E'],
+    [2, 'C E'],
+    [2, 'D E'],
+    [1, 'D E F'],
+    [1, 'B C'],
+    [1, 'B G'],
+    [1, 'F G'],
+    [1, 'C D F'],
+    [1, 'E G'],
+    [1, 'B C F'],
+  ];
+  const REQUIRED_LABELS = ['B C D E', 'B C D E G', 'C D E'];
+  const OPTIONAL_LABELS = ['C E', 'D E'];
+  const EXPECTED_SEQ = ['B C D E', 'B C D E G', 'C D E', 'C E'];
+
+  function run(lines: string[]) {
+    const sp = parseSpecies(SPECIES7);
+    expect(sp.errors).toEqual([]);
+    const r = parseSplits(lines.join('\n'), sp.names);
+    expect(r.errors).toEqual([]);
+    expect(r.lineErrors).toEqual([]);
+    expect(r.candidates).toHaveLength(12);
+    const masks = r.candidates.map((c) => c.mask);
+    const weights = r.candidates.map((c) => c.weight);
+    const labels = r.candidates.map((c) => c.label);
+    const an = analyze(masks, weights, labels, sp.names.length);
+    const byLabel = new Map(labels.map((l, i) => [l, i]));
+    return { r, an, masks, weights, labels, byLabel };
+  }
+
+  /** 仅凭兼容矩阵 + 权重做 2^m 暴力枚举，独立复算得分、规范序列与三分类。 */
+  function recomputeViaMatrix(
+    compat: boolean[][],
+    weights: number[],
+    labels: string[],
+  ): { weight: number; count: number; seq: string[]; verdicts: string[] } {
+    const m = weights.length;
+    let bestW = -1;
+    let bestC = -1;
+    const optimal: number[][] = [];
+    for (let s = 0; s < 1 << m; s++) {
+      const mem: number[] = [];
+      for (let i = 0; i < m; i++) if (s & (1 << i)) mem.push(i);
+      let ok = true;
+      for (let a = 0; a < mem.length && ok; a++) {
+        for (let b = a + 1; b < mem.length; b++) {
+          if (!compat[mem[a]][mem[b]]) {
+            ok = false;
+            break;
+          }
+        }
+      }
+      if (!ok) continue;
+      const w = mem.reduce((x, i) => x + weights[i], 0);
+      if (w > bestW || (w === bestW && mem.length > bestC)) {
+        bestW = w;
+        bestC = mem.length;
+        optimal.length = 0;
+        optimal.push(mem);
+      } else if (w === bestW && mem.length === bestC) {
+        optimal.push(mem);
+      }
+    }
+    const seq = optimal
+      .map((mem) => mem.map((i) => labels[i]).sort())
+      .sort((a, b) => {
+        for (let i = 0; i < Math.min(a.length, b.length); i++)
+          if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+        return a.length - b.length;
+      })[0];
+    const verdicts = weights.map((_, i) => {
+      const inAll = optimal.every((mem) => mem.includes(i));
+      const inSome = optimal.some((mem) => mem.includes(i));
+      return inAll ? 'required' : inSome ? 'optional' : 'never';
+    });
+    return { weight: bestW, count: bestC, seq, verdicts };
+  }
+
+  it('得分 12/4，展示解取 CE，CE 与 DE 均可选，三条共存分裂必选', () => {
+    const { r, an, byLabel } = run(SPEC.map(([w, side]) => `${w}: ${side}`));
+
+    expect(an.score).toEqual({ weight: 12, count: 4 });
+    expect(an.chosen.map((i) => r.candidates[i].label)).toEqual(EXPECTED_SEQ);
+
+    for (const l of REQUIRED_LABELS) expect(an.verdicts[byLabel.get(l)!]).toBe('required');
+    for (const l of OPTIONAL_LABELS) expect(an.verdicts[byLabel.get(l)!]).toBe('optional');
+    const optionalOrRequired = new Set([...REQUIRED_LABELS, ...OPTIONAL_LABELS]);
+    for (const [, side] of SPEC) {
+      if (!optionalOrRequired.has(side)) expect(an.verdicts[byLabel.get(side)!]).toBe('never');
+    }
+
+    // 恰有两个同优解，展示解是其中字典序更小者
+    const witnessA = ['B C D E G', 'B C D E', 'C D E', 'C E'];
+    const witnessB = ['B C D E G', 'B C D E', 'C D E', 'D E'];
+    for (const witness of [witnessA, witnessB]) {
+      const idx = witness.map((l) => byLabel.get(l)!);
+      const wsum = idx.reduce((x, i) => x + r.candidates[i].weight, 0);
+      expect(wsum).toBe(12);
+      for (let a = 0; a < idx.length; a++)
+        for (let b = a + 1; b < idx.length; b++)
+          expect(an.compat[idx[a]][idx[b]]).toBe(true);
+    }
+    // CE 与 DE 互斥，二者只在同优解间替代
+    expect(an.compat[byLabel.get('C E')!][byLabel.get('D E')!]).toBe(false);
+  });
+
+  it('兼容矩阵可独立复算：重算得分、规范序列、三分类与分析一致', () => {
+    const { an, masks, weights, labels } = run(SPEC.map(([w, side]) => `${w}: ${side}`));
+    // 矩阵本身与四交集判定逐条一致、对称、对角为真
+    expect(an.compat).toHaveLength(12);
+    for (let i = 0; i < 12; i++) {
+      expect(an.compat[i][i]).toBe(true);
+      for (let j = 0; j < 12; j++) {
+        expect(an.compat[i][j]).toBe(compatible(masks[i], masks[j], 7));
+        expect(an.compat[i][j]).toBe(an.compat[j][i]);
+      }
+    }
+    const rec = recomputeViaMatrix(an.compat, weights, labels);
+    expect({ weight: rec.weight, count: rec.count }).toEqual(an.score);
+    expect(rec.seq).toEqual(EXPECTED_SEQ);
+    expect(rec.seq).toEqual(an.chosen.map((i) => labels[i]));
+    expect(rec.verdicts).toEqual(an.verdicts);
+  });
+
+  it('录入顺序打乱并从互补侧录入后，按标签对应的结论完全一致', () => {
+    const base = run(SPEC.map(([w, side]) => `${w}: ${side}`));
+
+    // 固定置换；其中 4 条改从含 A 的互补侧录入（侧 B 省略，取补集）
+    const perm = [10, 0, 7, 3, 5, 11, 1, 8, 4, 2, 9, 6];
+    const complementSide: Record<number, string> = {
+      0: 'A F', // B C D E G
+      3: 'A B D F G', // C E
+      5: 'A B C G', // D E F
+      11: 'A D E G', // B C F
+    };
+    const shuffledLines = perm.map((idx) => {
+      const [w, side] = SPEC[idx];
+      return `${w}: ${complementSide[idx] ?? side}`;
+    });
+    const reordered = run(shuffledLines);
+
+    // 互补规范化：同一批规范身份（掩码），顺序无关
+    expect(new Set(reordered.masks)).toEqual(new Set(base.masks));
+    expect(reordered.an.score).toEqual(base.an.score);
+
+    // 展示解规范序列一致（与录入位置无关）
+    expect(reordered.an.chosen.map((i) => reordered.labels[i])).toEqual(EXPECTED_SEQ);
+
+    // 三分类按标签一一对应
+    for (const [label, bi] of base.byLabel) {
+      const ri = reordered.byLabel.get(label)!;
+      expect(reordered.an.verdicts[ri], `标签 ${label}`).toBe(base.an.verdicts[bi]);
+    }
+
+    // 兼容矩阵按标签重排后一致
+    for (const [la, ia] of base.byLabel) {
+      for (const [lb, ib] of base.byLabel) {
+        expect(reordered.an.compat[reordered.byLabel.get(la)!][reordered.byLabel.get(lb)!]).toBe(
+          base.an.compat[ia][ib],
+        );
+      }
+    }
+  });
+});
+
 describe('popcount', () => {
   it('基本计数', () => {
     expect(popcount(0)).toBe(0);
@@ -310,6 +481,65 @@ describe('与暴力枚举对照（随机实例）', () => {
         `实例 ${t} 展示解`,
       ).toEqual(bf.chosenLabels);
       expect(an.verdicts, `实例 ${t} 三分类`).toEqual(bf.verdicts);
+    }
+  });
+
+  it('40 个 ≥12 候选实例（旧支配剪枝的启用阈值）与暴力一致且顺序无关', () => {
+    const rand = lcg(20260924);
+    for (let t = 0; t < 40; t++) {
+      const n = 7 + Math.floor(rand() * 3); // 7–9 个物种
+      const full = (1 << n) - 1;
+      const pool: number[] = [];
+      // 先取全部规范非平凡分裂做候选池，再随机抽取，保证能凑够 ≥12 条
+      for (let mask = 0; mask <= full; mask++) {
+        if (mask & 1) continue; // 规范侧不含首个物种
+        const c = popcount(mask);
+        if (c >= 2 && c <= n - 2) pool.push(mask);
+      }
+      const m = Math.min(pool.length, 12 + Math.floor(rand() * 5)); // 12–16 个候选
+      // Fisher–Yates 抽取
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+      const picked = pool.slice(0, m);
+      const make = (ms: number[]) => ({
+        masks: ms,
+        weights: ms.map(() => 1 + Math.floor(rand() * 9)),
+        labels: ms.map(
+          (mask) =>
+            Array.from({ length: n }, (_, i) => i)
+              .filter((i) => ((mask >> i) & 1) === 1)
+              .map((i) => `s${i}`)
+              .sort()
+              .join(' '),
+        ),
+      });
+      const base = make(picked);
+      // 权重与候选绑定：换序时同步重排权重
+      const order = picked.map((_, i) => i).reverse();
+      const shuffledMasks = order.map((i) => base.masks[i]);
+      const shuffledWeights = order.map((i) => base.weights[i]);
+      const shuffledLabels = order.map((i) => base.labels[i]);
+
+      const an = analyze(base.masks, base.weights, base.labels, n);
+      const bf = bruteForce(base.masks, base.weights, base.labels, n);
+      expect(an.score, `实例 ${t} 得分`).toEqual({ weight: bf.weight, count: bf.count });
+      expect(an.chosen.map((i) => base.labels[i]), `实例 ${t} 展示解`).toEqual(
+        bf.chosenLabels,
+      );
+      expect(an.verdicts, `实例 ${t} 三分类`).toEqual(bf.verdicts);
+
+      // 录入顺序变化：按标签复对齐结论
+      const an2 = analyze(shuffledMasks, shuffledWeights, shuffledLabels, n);
+      expect(an2.score).toEqual(an.score);
+      expect(an2.chosen.map((i) => shuffledLabels[i])).toEqual(
+        an.chosen.map((i) => base.labels[i]),
+      );
+      for (let i = 0; i < m; i++) {
+        const j = shuffledLabels.indexOf(base.labels[i]);
+        expect(an2.verdicts[j], `实例 ${t} 标签 ${base.labels[i]}`).toBe(an.verdicts[i]);
+      }
     }
   });
 });

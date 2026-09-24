@@ -107,6 +107,88 @@ header('场景三：候选三分类（必选 / 可选 / 从不选）与字典序
   );
 }
 
+// ---------------------------------------------------------------- 场景四
+header('场景四：7 物种 12 候选并列——CE/DE 等权替代，二者均可选且展示解取 CE');
+{
+  const lines = [
+    '4: B C D E G',
+    '3: B C D E',
+    '3: C D E',
+    '2: C E',
+    '2: D E',
+    '1: D E F',
+    '1: B C',
+    '1: B G',
+    '1: F G',
+    '1: C D F',
+    '1: E G',
+    '1: B C F',
+  ];
+  const sp = parseSpecies('A B C D E F G');
+  const r = parseSplits(lines.join('\n'), sp.names);
+  const an = analyze(
+    r.candidates.map((c) => c.mask),
+    r.candidates.map((c) => c.weight),
+    r.candidates.map((c) => c.label),
+    sp.names.length,
+  );
+  const labelIdx = new Map(r.candidates.map((c, i) => [c.label, i]));
+  check('候选齐备', r.candidates.length === 12 && r.lineErrors.length === 0, `有效候选 ${r.candidates.length} 条`);
+  check(
+    '最优得分',
+    an.score.weight === 12 && an.score.count === 4,
+    `总权重 ${an.score.weight}、数量 ${an.score.count}`,
+  );
+  const seq = an.chosen.map((i) => r.candidates[i].label);
+  check(
+    '字典序最小展示解采用 CE',
+    seq.join('|') === 'B C D E|B C D E G|C D E|C E',
+    `展示解 = [${seq.join(', ')}]（含 CE 而非 DE）`,
+  );
+  const expectedVerdicts: Array<[string, string]> = [
+    ['B C D E G', 'required'],
+    ['B C D E', 'required'],
+    ['C D E', 'required'],
+    ['C E', 'optional'],
+    ['D E', 'optional'],
+  ];
+  const triOk =
+    expectedVerdicts.every(([l, v]) => an.verdicts[labelIdx.get(l)!] === v) &&
+    ['D E F', 'B C', 'B G', 'F G', 'C D F', 'E G', 'B C F'].every(
+      (l) => an.verdicts[labelIdx.get(l)!] === 'never',
+    );
+  check(
+    '三分类：三条共存分裂必选、CE/DE 均可选、其余从不选',
+    triOk,
+    `CE=${an.verdicts[labelIdx.get('C E')!]}，DE=${an.verdicts[labelIdx.get('D E')!]}`,
+  );
+
+  // 录入顺序打乱并从互补侧录入，按标签对应结论须一致
+  const perm = [10, 0, 7, 3, 5, 11, 1, 8, 4, 2, 9, 6];
+  const complementSide: Record<number, string> = {
+    0: 'A F', // B C D E G
+    3: 'A B D F G', // C E
+    5: 'A B C G', // D E F
+    11: 'A D E G', // B C F
+  };
+  const r2 = parseSplits(
+    perm.map((idx) => `${lines[idx].split(':')[0]}: ${complementSide[idx] ?? lines[idx].split(': ')[1]}`).join('\n'),
+    sp.names,
+  );
+  const an2 = analyze(
+    r2.candidates.map((c) => c.mask),
+    r2.candidates.map((c) => c.weight),
+    r2.candidates.map((c) => c.label),
+    sp.names.length,
+  );
+  const label2 = new Map(r2.candidates.map((c, i) => [c.label, i]));
+  const orderOk =
+    JSON.stringify(an2.score) === JSON.stringify(an.score) &&
+    an2.chosen.map((i) => r2.candidates[i].label).join('|') === seq.join('|') &&
+    r.candidates.every((c) => an2.verdicts[label2.get(c.label)!] === an.verdicts[labelIdx.get(c.label)!]);
+  check('互补规范化与录入顺序变化不改变按标签的结论', orderOk, '打乱顺序并从互补侧录入 4 条后复算一致');
+}
+
 // ---------------------------------------------------------------- 汇总
 console.log('\n==================================================');
 if (failures === 0) {

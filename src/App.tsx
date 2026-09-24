@@ -3,8 +3,21 @@ import { analyze, parseSpecies, parseSplits } from './lib/splits';
 import { SplitTable } from './components/SplitTable';
 import { CompatMatrix } from './components/CompatMatrix';
 
-const DEFAULT_SPECIES = 'A B C D E F';
-const DEFAULT_SPLITS = ['10: A B', '5: C D', '5: C E', '12: A C'].join('\n');
+const DEFAULT_SPECIES = 'A B C D E F G';
+const DEFAULT_SPLITS = [
+  '4: B C D E G',
+  '3: B C D E',
+  '3: C D E',
+  '2: C E',
+  '2: D E',
+  '1: D E F',
+  '1: B C',
+  '1: B G',
+  '1: F G',
+  '1: C D F',
+  '1: E G',
+  '1: B C F',
+].join('\n');
 
 export default function App() {
   const [speciesText, setSpeciesText] = useState(DEFAULT_SPECIES);
@@ -73,7 +86,7 @@ export default function App() {
           <textarea
             value={splitsText}
             onChange={(e) => setSplitsText(e.target.value)}
-            rows={8}
+            rows={12}
             spellCheck={false}
             placeholder={'每行：权重: 侧A | 侧B\n例：10: A B | C D E F'}
           />

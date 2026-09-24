@@ -233,38 +233,16 @@ function sameScore(a: Score, b: Score): boolean {
   return a.weight === b.weight && a.count === b.count;
 }
 
-function reduceSearchCandidates(compat: boolean[][], weights: number[]): number[] {
-  const active = new Array<boolean>(weights.length).fill(true);
-  if (weights.length < 12) return active.map((_, i) => i);
-
-  for (let candidate = 0; candidate < weights.length; candidate++) {
-    for (let replacement = 0; replacement < weights.length; replacement++) {
-      if (candidate === replacement || weights[candidate] !== weights[replacement]) continue;
-      let coversEveryNeighbor = true;
-      let hasExtraNeighbor = false;
-      for (let other = 0; other < weights.length; other++) {
-        if (other === candidate || other === replacement) continue;
-        if (compat[candidate][other] && !compat[replacement][other]) {
-          coversEveryNeighbor = false;
-          break;
-        }
-        if (!compat[candidate][other] && compat[replacement][other]) hasExtraNeighbor = true;
-      }
-      if (coversEveryNeighbor && hasExtraNeighbor) {
-        active[candidate] = false;
-        break;
-      }
-    }
-  }
-
-  return active.flatMap((isActive, i) => (isActive ? [i] : []));
-}
-
 /**
  * 精确求解带约束的最大兼容集：先最大化总权重，再最大化数量。
  * forcedIn 中的候选必选，forcedOut 中的候选禁用；约束不可行时返回 null。
  * 分支定界：候选 ≤28，用位掩码表示剩余候选集；上界 = 当前权重 + 剩余权重和。
+ * 剩余权重和与剩余候选数随递归参数递推（O(1) 剪枝判定）；
  * 相容的非平凡分裂集合大小 ≤ n-3（二歧树内部分裂数），用于数量剪枝。
+ *
+ * 注意：不得按「同权邻居集包含」预删候选——那种支配替换只保持最优得分，
+ * 却会抹掉同优解之间的等权替代（如 CE↔DE），使字典序展示解与三分类失真。
+ * 得分、展示解与三分类必须在同一批完整候选身份上求解。
  */
 export function solveMaxCompatible(
   masks: number[],
@@ -302,7 +280,7 @@ export function solveMaxCompatible(
     }
     if (ok) free.push(i);
   }
-  free.sort((a, b) => weights[b] - weights[a]); // 权重降序，尽早找到好解
+  free.sort((a, b) => weights[b] - weights[a] || a - b); // 权重降序（同权按序号），尽早找到好解
 
   const k = free.length;
   const w = free.map((i) => weights[i]);
@@ -317,17 +295,11 @@ export function solveMaxCompatible(
   const maxCount = n - 3; // 相容非平凡分裂集的大小上界
 
   let best: Score = { weight: baseW, count: baseC };
+  let initSumW = 0;
+  for (let i = 0; i < k; i++) initSumW += w[i];
 
-  function rec(cands: number, cw: number, cc: number): void {
-    let sumW = 0;
-    let cnt = 0;
-    for (let mm = cands; mm !== 0; ) {
-      const b = mm & -mm;
-      const i = 31 - Math.clz32(b);
-      sumW += w[i];
-      cnt++;
-      mm ^= b;
-    }
+  // cands：剩余候选位集；sumW/cnt 为其中权重和与数量（随分支递推，免去逐位遍历）。
+  function rec(cands: number, sumW: number, cnt: number, cw: number, cc: number): void {
     if (cw + sumW < best.weight) return;
     if (cw + sumW === best.weight && cc + cnt <= best.count) return;
     if (cands === 0) {
@@ -337,11 +309,24 @@ export function solveMaxCompatible(
     }
     const b = cands & -cands;
     const i = 31 - Math.clz32(b);
-    if (cc + 1 <= maxCount) rec(cands & compatBits[i] & ~b, cw + w[i], cc + 1);
-    rec(cands & ~b, cw, cc);
+    // 选 i：剔除与 i 不兼容的其余候选，并同步扣减它们的权重和与数量。
+    if (cc + 1 <= maxCount) {
+      const next = cands & compatBits[i] & ~b;
+      let dropW = 0;
+      let dropCnt = 0;
+      for (let mm = cands & ~b & ~compatBits[i]; mm !== 0; ) {
+        const db = mm & -mm;
+        dropW += w[31 - Math.clz32(db)];
+        dropCnt++;
+        mm ^= db;
+      }
+      rec(next, sumW - w[i] - dropW, cnt - 1 - dropCnt, cw + w[i], cc + 1);
+    }
+    // 不选 i。
+    rec(cands & ~b, sumW - w[i], cnt - 1, cw, cc);
   }
 
-  rec((1 << k) - 1, baseW, baseC);
+  rec((1 << k) - 1, initSumW, k, baseW, baseC);
   return best;
 }
 
@@ -365,42 +350,31 @@ export function analyze(
     compat.push(row);
   }
 
-  const activeIndexes = reduceSearchCandidates(compat, weights);
-  const activeMasks = activeIndexes.map((i) => masks[i]);
-  const activeWeights = activeIndexes.map((i) => weights[i]);
-  const compactIndex = new Map<number, number>(
-    activeIndexes.map((original, compact): [number, number] => [original, compact]),
-  );
+  // 得分、展示解、三分类一律在同一批完整候选身份上求解，
+  // 不做会抹掉等权替代关系的预删减。
   const best = solveMaxCompatible(masks, weights, n);
   if (best === null) throw new Error('空集恒可行，不应无解');
 
   // 字典序最小展示解：按规范标签升序贪心，能选则选。
   // 若某同优解含更小标签的分裂而另一解不含，则前者的规范序列必然后缀无关地更小，
   // 故逐步「可行即选」可得到字典序最小序列。
-  const order = [...activeIndexes].sort((a, b) =>
-    labels[a] < labels[b] ? -1 : 1,
+  const order = [...masks.keys()].sort((a, b) =>
+    labels[a] < labels[b] ? -1 : labels[a] > labels[b] ? 1 : 0,
   );
-  const chosenCompact: number[] = [];
+  const chosen: number[] = [];
   const forcedOut = new Set<number>();
-  for (const original of order) {
-    const i = compactIndex.get(original) as number;
-    const s = solveMaxCompatible(activeMasks, activeWeights, n, [...chosenCompact, i], forcedOut);
-    if (s !== null && sameScore(s, best)) chosenCompact.push(i);
+  for (const i of order) {
+    const s = solveMaxCompatible(masks, weights, n, [...chosen, i], forcedOut);
+    if (s !== null && sameScore(s, best)) chosen.push(i);
     else forcedOut.add(i);
   }
-  const chosen = chosenCompact.map((i) => activeIndexes[i]);
 
-  // 三分类
+  // 三分类：含 i 仍达最优 ⇒ 出现在某些同优解；禁 i 后不达最优 ⇒ 每个同优解都含 i。
   const verdicts: Verdict[] = [];
-  for (let original = 0; original < m; original++) {
-    const i = compactIndex.get(original);
-    if (i === undefined) {
-      verdicts.push('never');
-      continue;
-    }
-    const withI = solveMaxCompatible(activeMasks, activeWeights, n, [i]);
+  for (let i = 0; i < m; i++) {
+    const withI = solveMaxCompatible(masks, weights, n, [i]);
     const inSome = withI !== null && sameScore(withI, best);
-    const withoutI = solveMaxCompatible(activeMasks, activeWeights, n, [], new Set([i]));
+    const withoutI = solveMaxCompatible(masks, weights, n, [], new Set([i]));
     const inAll = !(withoutI !== null && sameScore(withoutI, best));
     if (inAll) verdicts.push('required');
     else if (!inSome) verdicts.push('never');
